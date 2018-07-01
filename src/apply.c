@@ -406,15 +406,19 @@ static int apply_one(
 	delta = git_diff_get_delta(diff, i);
 
 	if (delta->status != GIT_DELTA_ADDED) {
-		if ((error = git_reader_read(&pre_contents, &pre_id,
-		    preimage_reader, delta->old_file.path)) < 0) {
+		error = git_reader_read(&pre_contents, &pre_id,
+			preimage_reader, delta->old_file.path);
 
-			/* ENOTFOUND is really an application error */
-			if (error == GIT_ENOTFOUND)
-				error = GIT_EAPPLYFAIL;
+		/* ENOTFOUND means the preimage was not found; apply failed. */
+		if (error == GIT_ENOTFOUND)
+			error = GIT_EAPPLYFAIL;
 
+		/* When applying to BOTH, the index did not match the workdir. */
+		if (error == GIT_READER_MISMATCH)
+			error = apply_err("%s: does not match index", delta->old_file.path);
+
+		if (error < 0)
 			goto done;
-		}
 
 		if (preimage) {
 			memset(&pre_entry, 0, sizeof(git_index_entry));
@@ -552,13 +556,6 @@ static int git_apply__to_workdir(
 
 	error = git_checkout_index(repo, postimage, &checkout_opts);
 
-	/*
-	 * When there's a checkout conflict, the file in the working directory
-	 * has been modified.  Upgrade this error to an application error.
-	 */
-	if (error == GIT_ECONFLICT)
-		error = GIT_EAPPLYFAIL;
-
 done:
 	git_vector_free(&paths);
 	return error;
@@ -649,10 +646,12 @@ int git_apply(
 	 * in `--cached` or `--index` mode, we apply to the contents already
 	 * in the index.
 	 */
-	if (opts.location == GIT_APPLY_LOCATION_WORKDIR)
-		error = git_reader_for_workdir(&pre_reader, repo, false);
-	else
+	if (opts.location == GIT_APPLY_LOCATION_BOTH)
+		error = git_reader_for_workdir(&pre_reader, repo, true);
+	else if (opts.location == GIT_APPLY_LOCATION_INDEX)
 		error = git_reader_for_index(&pre_reader, repo, NULL);
+	else
+		error = git_reader_for_workdir(&pre_reader, repo, false);
 
 	if (error < 0)
 		goto done;
