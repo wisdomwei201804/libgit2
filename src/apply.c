@@ -386,6 +386,7 @@ done:
 static int apply_one(
 	git_repository *repo,
 	git_reader *preimage_reader,
+	git_index *preimage,
 	git_index *postimage,
 	git_diff *diff,
 	size_t i)
@@ -395,8 +396,8 @@ static int apply_one(
 	const git_diff_delta *delta;
 	char *filename = NULL;
 	unsigned int mode;
-	git_oid blob_id;
-	git_index_entry index_entry;
+	git_oid pre_id, post_id;
+	git_index_entry pre_entry, post_entry;
 	int error;
 
 	if ((error = git_patch_from_diff(&patch, diff, i)) < 0)
@@ -404,11 +405,8 @@ static int apply_one(
 
 	delta = git_diff_get_delta(diff, i);
 
-	if (delta->status == GIT_DELTA_DELETED)
-		goto done;
-
 	if (delta->status != GIT_DELTA_ADDED) {
-		if ((error = git_reader_read(&pre_contents,
+		if ((error = git_reader_read(&pre_contents, &pre_id,
 		    preimage_reader, delta->old_file.path)) < 0) {
 
 			/* ENOTFOUND is really an application error */
@@ -417,20 +415,33 @@ static int apply_one(
 
 			goto done;
 		}
+
+		if (preimage) {
+			memset(&pre_entry, 0, sizeof(git_index_entry));
+			pre_entry.path = delta->old_file.path;
+			pre_entry.mode = delta->old_file.mode;
+			git_oid_cpy(&pre_entry.id, &pre_id);
+
+			if ((error = git_index_add(preimage, &pre_entry)) < 0)
+				goto done;
+		}
 	}
+
+	if (delta->status == GIT_DELTA_DELETED)
+		goto done;
 
 	if ((error = git_apply__patch(&post_contents, &filename, &mode,
 			pre_contents.ptr, pre_contents.size, patch)) < 0 ||
-		(error = git_blob_create_frombuffer(&blob_id, repo,
+		(error = git_blob_create_frombuffer(&post_id, repo,
 			post_contents.ptr, post_contents.size)) < 0)
 		goto done;
 
-	memset(&index_entry, 0, sizeof(git_index_entry));
-	index_entry.path = filename;
-	index_entry.mode = mode;
-	git_oid_cpy(&index_entry.id, &blob_id);
+	memset(&post_entry, 0, sizeof(git_index_entry));
+	post_entry.path = filename;
+	post_entry.mode = mode;
+	git_oid_cpy(&post_entry.id, &post_id);
 
-	if ((error = git_index_add(postimage, &index_entry)) < 0)
+	if ((error = git_index_add(postimage, &post_entry)) < 0)
 		goto done;
 
 done:
@@ -482,7 +493,7 @@ int git_apply_tree(
 	}
 
 	for (i = 0; i < git_diff_num_deltas(diff); i++) {
-		if ((error = apply_one(repo, pre_reader, postimage, diff, i)) < 0)
+		if ((error = apply_one(repo, pre_reader, NULL, postimage, diff, i)) < 0)
 			goto done;
 	}
 
@@ -500,6 +511,7 @@ done:
 static int git_apply__to_workdir(
     git_repository *repo,
     git_diff *diff,
+    git_index *preimage,
     git_index *postimage,
     git_apply_options *opts)
 {
@@ -536,6 +548,8 @@ static int git_apply__to_workdir(
 	checkout_opts.paths.strings = (char **)paths.contents;
 	checkout_opts.paths.count = paths.length;
 
+	checkout_opts.baseline_index = preimage;
+
 	error = git_checkout_index(repo, postimage, &checkout_opts);
 
 	/*
@@ -553,6 +567,7 @@ done:
 static int git_apply__to_index(
     git_repository *repo,
     git_diff *diff,
+    git_index *preimage,
     git_index *postimage,
     git_apply_options *opts)
 {
@@ -562,6 +577,7 @@ static int git_apply__to_index(
 	size_t i;
 	int error;
 
+	GIT_UNUSED(preimage);
 	GIT_UNUSED(opts);
 
 	if ((error = git_repository_index(&index, repo)) < 0)
@@ -614,7 +630,7 @@ int git_apply(
 	git_diff *diff,
 	git_apply_options *given_opts)
 {
-	git_index *postimage = NULL;
+	git_index *preimage = NULL, *postimage = NULL;
 	git_reader *pre_reader = NULL;
 	git_apply_options opts = GIT_APPLY_OPTIONS_INIT;
 	size_t i;
@@ -642,26 +658,29 @@ int git_apply(
 		goto done;
 
 	/*
-	 * Build the postimage differences.  Note that this is not the
-	 * complete postimage, it only contains the new files created
-	 * during the application.  We will limit checkout to only write
-	 * the files affected by this diff.
+	 * Build the preimage and postimage (differences).  Note that
+	 * this is not the complete preimage or postimage, it only
+	 * contains the files affected by the patch.  We want to avoid
+	 * having the full repo index, so we will limit our checkout
+	 * to only write these files that were affected by the diff.
 	 */
-	if ((error = git_index_new(&postimage)) < 0)
+	if ((error = git_index_new(&preimage)) < 0 ||
+	    (error = git_index_new(&postimage)) < 0)
 		goto done;
 
 	for (i = 0; i < git_diff_num_deltas(diff); i++) {
-		if ((error = apply_one(repo, pre_reader, postimage, diff, i)) < 0)
+		if ((error = apply_one(repo, pre_reader, preimage, postimage, diff, i)) < 0)
 			goto done;
 	}
 
 	if (opts.location == GIT_APPLY_LOCATION_INDEX)
-		error = git_apply__to_index(repo, diff, postimage, &opts);
+		error = git_apply__to_index(repo, diff, preimage, postimage, &opts);
 	else
-		error = git_apply__to_workdir(repo, diff, postimage, &opts);
+		error = git_apply__to_workdir(repo, diff, preimage, postimage, &opts);
 
 done:
 	git_index_free(postimage);
+	git_index_free(preimage);
 	git_reader_free(pre_reader);
 
 	return error;

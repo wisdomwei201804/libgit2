@@ -24,6 +24,7 @@ typedef struct {
 
 static int tree_reader_read(
 	git_buf *out,
+	git_oid *out_id,
 	git_reader *_reader,
 	const char *filename)
 {
@@ -43,6 +44,9 @@ static int tree_reader_read(
 
 	if (git_buf_oom(out))
 		error = -1;
+
+	if (out_id)
+		git_oid_cpy(out_id, git_tree_entry_id(tree_entry));
 
 done:
 	git_blob_free(blob);
@@ -79,6 +83,7 @@ typedef struct {
 
 static int workdir_reader_read(
 	git_buf *out,
+	git_oid *out_id,
 	git_reader *_reader,
 	const char *filename)
 {
@@ -91,7 +96,11 @@ static int workdir_reader_read(
 		goto done;
 
 	/* TODO: should we read the filtered data? */
-	error = git_futils_readbuffer(out, path.ptr);
+	if ((error = git_futils_readbuffer(out, path.ptr)) < 0)
+		goto done;
+
+	if (out_id)
+		error = git_odb_hash(out_id, out->ptr, out->size, GIT_OBJ_BLOB);
 
 done:
 	git_buf_dispose(&path);
@@ -128,6 +137,7 @@ typedef struct {
 
 static int index_reader_read(
 	git_buf *out,
+	git_oid *out_id,
 	git_reader *_reader,
 	const char *filename)
 {
@@ -141,6 +151,9 @@ static int index_reader_read(
 
 	if ((error = git_blob_lookup(&blob, reader->repo, &entry->id)) < 0)
 		goto done;
+
+	if (out_id)
+		git_oid_cpy(out_id, &entry->id);
 
 	error = git_blob__getbuf(out, blob);
 
@@ -186,11 +199,15 @@ int git_reader_for_index(
 
 /* generic */
 
-int git_reader_read(git_buf *out, git_reader *reader, const char *filename)
+int git_reader_read(
+	git_buf *out,
+	git_oid *out_id,
+	git_reader *reader,
+	const char *filename)
 {
 	assert(out && reader && filename);
 
-	return reader->read(out, reader, filename);
+	return reader->read(out, out_id, reader, filename);
 }
 
 void git_reader_free(git_reader *reader)
